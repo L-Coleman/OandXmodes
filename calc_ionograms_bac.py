@@ -191,7 +191,7 @@ def chirp_downconvert(conf,
     ds=get_m_per_Hz(rate)
     fftlen = int(sr_dec*ds/dr/2.0)*2
     fft_step=int((df/rate)*sr_dec)
-    zdsave = zd
+
     S=spectrogram(np.conj(zd),window=fftlen,step=fft_step,wf=ss.hann(fftlen))
 
     freqs=rate*np.arange(S.shape[0])*fft_step/sr_dec
@@ -225,7 +225,7 @@ def chirp_downconvert(conf,
         ho["station_name"]=conf.station_name
         ho["sr"]=float(sr_dec) # ionogram sample-rate
         if conf.save_raw_voltage:
-            ho["z"]=zdsave
+            ho["z"]=zd
         ho["ch"]=ch            # channel name
         ho.close()
     except:
