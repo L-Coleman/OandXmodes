@@ -10,7 +10,7 @@ sysctl -w net.core.wmem_default=500000000
 sysctl -w net.core.rmem_default=500000000
 
 
-INSTALL_PATH=/home/sdr/stokes
+INSTALL_PATH=/home/sdr/stokes_copy
 
 # make sure this is the right mpirun command (you might need mpirun instead of mpirun.mpich)
 MPIRUN=mpirun
@@ -40,7 +40,7 @@ echo "Starting ringbuffer"
 
 # detect chirps
 # two processes seems to be enough to keep up with realtime
-$MPIRUN -np 4 python3 detect_chirps.py $CONF_FILE > logs/detect.log 2>&1 &
+$MPIRUN -np 2 python3 detect_chirps.py $CONF_FILE > logs/detect.log 2>&1 &
 echo "Starting detect_chirps.py"
 
 # find timings
@@ -50,8 +50,8 @@ echo "Starting find_timings.py"
 # calculate ionograms
 # seems like four parallel processes work.
 # this means we can process four ionograms simultaneously!
-$MPIRUN -np 4 python3 calc_ionograms2.py $CONF_FILE $CH0 > logs/ionograms.log 2>&1 &
-$MPIRUN -np 4 python3 calc_ionograms2.py $CONF_FILE $CH1 > logs/ionograms.log 2>&1 &
+$MPIRUN -np 5 python3 calc_ionograms.py $CONF_FILE $CH0 $CH1 > logs/ionograms.log 2>&1 &
+$MPIRUN -np 5 python3 calc_ionograms.py $CONF_FILE $CH1 $CH0 > logs/ionograms.log 2>&1 &
 echo "Starting calc_ionograms scripts"
 
 # plot ionograms

@@ -110,7 +110,7 @@ def scan_for_chirps(conf,ch,dt=0.1):
             if not os.path.exists(dname):
                 os.mkdir(dname)
 
-            fname="%s/par-%s-%1.4f.h5"%(dname,ch,n.floor(t0))
+            fname="%s/par-%1.4f-%s.h5"%(dname,n.floor(t0),ch)
             
             if not os.path.exists(fname):
                 ho=h5py.File(fname,"w")

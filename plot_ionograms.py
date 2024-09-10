@@ -22,38 +22,57 @@ def kill(conf):
 def plot_ionogram(conf,f,normalize_by_frequency=True):
     ho=h5py.File(f,"r")
     t0=float(n.copy(ho[("t0")]))
-    ch=n.copy(ho[("ch")])
+    p_ch=n.copy(ho[("p_ch")])
     if not "id" in ho.keys():
         return
     cid=int(n.copy(ho[("id")]))  # ionosonde id
     
-    img_fname="%s/%s/lfm_ionogram-%s-%03d-%1.2f.png"%(conf.output_dir,cd.unix2dirname(t0),ch,cid,t0)
+    img_fname="%s/%s/lfm_ionogram-%03d-%1.2f.png"%(conf.output_dir,cd.unix2dirname(t0),cid,t0)
     if os.path.exists(img_fname):
-        #print("Ionogram plot %s already exists. Skipping"%(img_fname))
+        print("Ionogram plot %s already exists. Skipping"%(img_fname))
         ho.close()
         return
     
     print("Plotting %s rate %1.2f (kHz/s) t0 %1.5f (unix)"%(f,float(n.copy(ho[("rate")]))/1e3,float(n.copy(ho[("t0")]))))
-    S=n.copy(n.array(ho[("S")],dtype=n.float64))          # ionogram frequency-range
-    freqs=n.copy(ho[("freqs")])  # frequency bins
+    #Spo=n.copy(n.array(ho[("Spo")],dtype=n.float64))          # ionogram frequency-range
+    #Spx=n.copy(n.array(ho[("Spx")],dtype=n.float64))
+    #SSp=n.copy(n.array(ho[("SSp")],dtype=n.float64))
+    #SSs=n.copy(n.array(ho[("SSs")],dtype=n.float64))    
+    Sp=n.copy(n.array(ho[("Sp")],dtype=n.float64))          # ionogram frequency-range
+    Ss=n.copy(n.array(ho[("Ss")],dtype=n.float64))
+    phase_diff=n.copy(n.array(ho[("phase_diff")],dtype=n.float64))
+    pfreqs=n.copy(ho[("pfreqs")])
+    sfreqs=n.copy(ho[("sfreqs")])  # frequency bins
     ranges=n.copy(ho[("ranges")])  # range gates
 
-
+    #Sp= (Spo+SSp)
+    #Ss= (Spx+SSs)
     if normalize_by_frequency:
-        for i in range(S.shape[0]):
-            noise=n.nanmedian(S[i,:])
-            S[i,:]=(S[i,:]-noise)/noise
-        S[S<=0.0]=1e-3
-            
-    max_range_idx=n.argmax(n.max(S,axis=0))
-    
-    dB=n.transpose(10.0*n.log10(S))
-    if normalize_by_frequency == False:
-        dB=dB-n.nanmedian(dB)
+        for i in range(Sp.shape[0]):
+            noise=n.nanmedian(Sp[i,:])
+            Sp[i,:]=(Sp[i,:]-noise)/noise
+        Sp[Sp<=0.0]=1e-3
+        for j in range(Ss.shape[0]):
+            noise=n.nanmedian(Ss[j,:])
+            Ss[j,:]=(Ss[j,:]-noise)/noise
+        Ss[Ss<=0.0]=1e-3
+          
 
-    dB[n.isnan(dB)]=0.0
-    dB[n.isfinite(dB)!=True]=0.0    
+    #max_range_idx=[n.argmax(n.max(Sp,axis=0)),n.argmax(n.max(Ss,axis=0))]
+    phase_diff = n.transpose(phase_diff *180/n.pi +180)
     
+    dBp=n.transpose(10.0*n.log10(Sp))
+    dBs=n.transpose(10.0*n.log10(Ss))
+    if normalize_by_frequency == False:
+        dBp=dBp-n.nanmedian(dBp)
+        dBs=dBs-n.nanmedian(dBs)
+
+    dBp[n.isnan(dBp)]=0.0
+    dBs[n.isnan(dBs)]=0.0
+    dBp[n.isfinite(dBp)!=True]=0.0    
+    dBs[n.isfinite(dBs)!=True]=0.0  
+    tracesonly= (dBp<=9.9) & (dBs<=9.9)
+    phase_diff[tracesonly] = n.nan 
     # assume that t0 is at the start of a standard unix second
     # therefore, the propagation time is anything added to a full second
 
@@ -61,25 +80,43 @@ def plot_ionogram(conf,f,normalize_by_frequency=True):
     dr=dt*c.c/1e3
     # converted to one-way travel time
     range_gates=dr+ranges/1e3
-    r0=range_gates[max_range_idx]
-    fig=plt.figure(figsize=(1.5*8,1.5*6))
-    plt.pcolormesh(freqs/1e6,range_gates,dB,vmin=-3,vmax=30.0,cmap="inferno")
-    cb=plt.colorbar()
-    cb.set_label("SNR (dB)")
-    plt.title("%s Chirp-rate %1.2f kHz/s t0=%1.5f (unix s)\n%s %s (UTC)"%(ch,float(n.copy(ho[("rate")]))/1e3,float(n.copy(ho[("t0")])),conf.station_name,cd.unix2datestr(float(n.copy(ho[("t0")])))))
-    plt.xlabel("Frequency (MHz)")
-    plt.ylabel("One-way range offset (km)")
-    if conf.manual_range_extent:
-        plt.ylim([conf.min_range/1e3,conf.max_range/1e3])
-    else:
-        plt.ylim([dr-conf.max_range_extent/1e3,dr+conf.max_range_extent/1e3])
+    #r0=range_gates[max_range_idx]
+    
+    fig,ax=plt.subplots(2,2,figsize=[14,10])
+    a=ax[0,0].pcolormesh(pfreqs/1e6,range_gates,dBp,vmin=-3,vmax=30.0,cmap="inferno")
+    fig.colorbar(a,ax=ax[0,0],label="SNR (dB)")
+
+    b=ax[0,1].pcolormesh(sfreqs/1e6,range_gates,dBs,vmin=-3,vmax=30.0,cmap="inferno")
+    fig.colorbar(b,ax=ax[0,1],label="SNR (dB)")
+
+    d=ax[1,0].pcolormesh(sfreqs/1e6,range_gates,phase_diff,cmap="seismic")
+    fig.colorbar(d,ax=ax[1,0],label="phase shift (deg)")
+    
+    counts, bins = n.histogram(phase_diff[n.isfinite(phase_diff)],bins=40)
+    
+    e=ax[1,1].plot(bins[:-1], counts, 'o--', color='k', alpha=0.3)
+    #cb.set_label("SNR (dB)")
+    fig.suptitle("Chirp-rate %1.2f kHz/s t0=%1.5f (unix s)\n%s %s (UTC)"%(float(n.copy(ho[("rate")]))/1e3,float(n.copy(ho[("t0")])),conf.station_name,cd.unix2datestr(float(n.copy(ho[("t0")])))),
+                 y=0.92)
+    ax[0,0].set_xlabel("Frequency (MHz)")
+    ax[0,0].set_ylabel("One-way range offset (km)")
+    ax[0,1].set_xlabel("Frequency (MHz)")
+    ax[0,1].set_ylabel("One-way range offset (km)")
+    ax[1,0].set_ylabel("One-way range offset (km)")
+    ax[1,0].set_xlabel("Frequency (MHz)")
+    ax[1,1].set_xlabel("Phase (deg)")
+    ax[1,1].set_ylabel("Pixel Count")
+    #if conf.manual_range_extent:
+    #    plt.ylim([conf.min_range/1e3,conf.max_range/1e3])
+    #else:
+    #    plt.ylim([dr-conf.max_range_extent/1e3,dr+conf.max_range_extent/1e3])
         
 #    plt.ylim([dr-1000.0,dr+1000.0])
-    if conf.manual_freq_extent:
-        plt.xlim([conf.min_freq/1e6,conf.max_freq/1e6])
-    else:
-        plt.xlim([0,conf.maximum_analysis_frequency/1e6])
-    plt.tight_layout()
+    #if conf.manual_freq_extent:
+    #    plt.xlim([conf.min_freq/1e6,conf.max_freq/1e6])
+    #else:
+    #    plt.xlim([0,conf.maximum_analysis_frequency/1e6])
+    #plt.tight_layout()
     plt.savefig(img_fname)
     fig.clf()
     plt.clf()
