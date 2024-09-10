@@ -17,6 +17,7 @@ import pyfftw
 import matplotlib.pyplot as plt
 import time
 import os
+import os.path
 import sys
 import traceback
 import pdb
@@ -27,6 +28,11 @@ import chirp_lib as cl
 comm=MPI.COMM_WORLD
 size=comm.Get_size()
 rank=comm.Get_rank()
+
+def kill(conf):
+    exists = os.path.isfile(conf.kill_path)
+    return exists
+
 
 def fft(z,l=None):
     """
@@ -86,7 +92,7 @@ def spectrogram(x,window=1024,step=512,wf=ss.hann(1024),n_oversample=13):
     n_substep=int(step/n_oversample)
     substep_idx=n.arange(n_oversample,dtype=n.int)- int((n_oversample-1)/2)
     
-    S=np.zeros([n_spec,window],dtype=n.float64)
+    S=np.zeros([n_spec,2,window],dtype=n.float64)
     for i in range(n_spec):
         n_avg=0.0
         for j in range(n_oversample):
@@ -95,17 +101,20 @@ def spectrogram(x,window=1024,step=512,wf=ss.hann(1024),n_oversample=13):
 #            print("%d %d"%(i0,step))
             
             if (i0 >= 0) and (i1 < len(x)):
-                freq_pwr=np.abs(np.fft.fftshift(np.fft.fft(wf*x[i0:i1])))**2.0
+                output_fft=np.fft.fftshift(np.fft.fft(wf*x[i0:i1]))
+                freq_pwr=np.abs(output_fft)**2.0
+                phase=np.arctan(np.imag(output_fft)/np.real(output_fft))
                 std_est = n.nanmedian( n.abs(freq_pwr-n.nanmedian(freq_pwr)) )
 #                print(std_est)
                 if std_est > 0:
-                    S[i,:] += (1.0/(std_est**2.0))*freq_pwr#*np.abs(np.fft.fftshift(np.fft.fft(wf*x[i0:i1])))**2.0
+                    S[i,0,:] += (1.0/(std_est**2.0))*freq_pwr#*np.abs(np.fft.fftshift(np.fft.fft(wf*x[i0:i1])))**2.0
+                    S[i,1,:] = phase
                     n_avg+=1.0/(std_est**2.0)
                 
-        S[i,:]=S[i,:]/n_avg
+        S[i,0,:]=S[i,0,:]/n_avg
         
     #normalize scale to float16
-    S=5e4*S/n.nanmax(S)
+    S[:,0,:]=5e4*S[:,0,:]/n.nanmax(S[:,0,:])
     return(S)
 
 def decimate(x,dec):
@@ -117,11 +126,12 @@ def decimate(x,dec):
         res += x[idx+i]
     return(res/float(dec))
 
-def chirp_downconvert(conf,
+def chirp_downconvert_double(conf,
                       t0,
                       d,
                       i0,                  
-                      ch,
+                      p_ch,
+                      s_ch,
                       rate,
                       dec=2500,
                       realtime_req=None,
@@ -137,47 +147,63 @@ def chirp_downconvert(conf,
     step=1000
     n_windows=int(dur*sr/(step*dec))+1
 
-    cdc=cl.chirp_downconvert(f0=-cf,
+    cdc_p=cl.chirp_downconvert(f0=-cf,
+                             rate=rate,
+                             dec=dec,
+                             dt=1.0/conf.sample_rate,
+                             n_threads=conf.n_downconversion_threads)
+    
+    cdc_s=cl.chirp_downconvert(f0=-cf,
                              rate=rate,
                              dec=dec,
                              dt=1.0/conf.sample_rate,
                              n_threads=conf.n_downconversion_threads)
     
     zd_len=n_windows*step
-    zd=np.zeros(zd_len,dtype=np.complex64)
-    
-    z_out=np.zeros(step,dtype=np.complex64)
+    zd_p=np.zeros(zd_len,dtype=np.complex64)
+    zd_s=np.zeros(zd_len,dtype=np.complex64)
+
+    z_outp=np.zeros(step,dtype=np.complex64)
+    z_outs=np.zeros(step,dtype=np.complex64)
     n_out=step
     
     for fi in range(n_windows):
         missing=False
         try:
             if conf.realtime:
-                b=d.get_bounds(ch)
-                while ((i0+idx+step*dec+cdc.filter_len*dec)+int(conf.sample_rate)) > b[1]:
+                b=d.get_bounds(p_ch)
+                while ((i0+idx+step*dec+cdc_p.filter_len*dec)+int(conf.sample_rate)) > b[1]:
                     # wait for more data to be acquired
                     # as the tail of the buffer doesn't have he data we
                     # need yet
                     time.sleep(1.0)
                     sleep_time+=1.0
-                    b=d.get_bounds(ch)
+                    b=d.get_bounds(p_ch)
                     
-            z=d.read_vector_c81d(i0+idx,step*dec+cdc.filter_len*dec,ch)
+            zp=d.read_vector_c81d(i0+idx,step*dec+cdc_p.filter_len*dec,p_ch)
+            zs=d.read_vector_c81d(i0+idx,step*dec+cdc_s.filter_len*dec,s_ch)
+
+
         except:
-#            z=np.zeros(step*dec+cdc.filter_len*dec,dtype=np.complex64)
+#            zp=np.zeros(step*dec+cdc.filter_len*dec,dtype=np.complex64)
             missing=True
             
         # we can skip this heavy step if there is missing data
         if not missing:
-            cdc.consume(z,z_out,n_out)
+            cdc_p.consume(zp,z_outp,n_out)
+            cdc_s.consume(zs,z_outs,n_out)
         else:
             # step chirp time forward
-            cdc.advance_time(dec*step)
-            z_out[:]=0.0
+            cdc_p.advance_time(dec*step)
+            cdc_s.advance_time(dec*step)
+            z_outp[:]=0.0
+            z_outs[:]=0.0
             
-        zd[(fi*step):(fi*step+step)]=z_out
+        zd_p[(fi*step):(fi*step+step)]=z_outp
+        zd_s[(fi*step):(fi*step+step)]=z_outs
         
         idx+=dec*step
+
 
     dr=conf.range_resolution
     df=conf.frequency_resolution
@@ -185,10 +211,14 @@ def chirp_downconvert(conf,
     ds=get_m_per_Hz(rate)
     fftlen = int(sr_dec*ds/dr/2.0)*2
     fft_step=int((df/rate)*sr_dec)
+    #zdsave = zd
+    Sp=spectrogram(np.conj(zd_p),window=fftlen,step=fft_step,wf=ss.hann(fftlen))
+    Ss=spectrogram(np.conj(zd_s),window=fftlen,step=fft_step,wf=ss.hann(fftlen))
 
-    S=spectrogram(np.conj(zd),window=fftlen,step=fft_step,wf=ss.hann(fftlen))
 
-    freqs=rate*np.arange(S.shape[0])*fft_step/sr_dec
+    pfreqs=rate*np.arange(Sp.shape[0])*fft_step/sr_dec
+    sfreqs=rate*np.arange(Ss.shape[0])*fft_step/sr_dec
+
     range_gates=ds*np.fft.fftshift(np.fft.fftfreq(fftlen,d=1.0/sr_dec))
 
     if conf.manual_range_extent:
@@ -196,31 +226,40 @@ def chirp_downconvert(conf,
     else:
         ridx=np.where( n.abs(range_gates) < conf.max_range_extent)[0]
 
-    fidx=n.arange(len(freqs),dtype=n.int)
+    fidx_p =n.arange(len(pfreqs),dtype=n.int)
+    fidx_s =n.arange(len(sfreqs),dtype=n.int)
     if conf.manual_freq_extent:
-        fidx=n.where( (freqs>conf.min_freq) & (freqs < conf.max_freq) )[0]
-        
+        fidx_p=n.where( (pfreqs>conf.min_freq) & (pfreqs < conf.max_freq) )[0]
+        fidx_s=n.where( (sfreqs>conf.min_freq) & (sfreqs < conf.max_freq) )[0]      
 
         
     try:
         dname="%s/%s"%(conf.output_dir,cd.unix2dirname(t0))
         if not os.path.exists(dname):
             os.mkdir(dname)
-        ofname="%s/lfm_ionogram-%s-%03d-%1.2f.h5"%(dname,conf.station_name,cid,t0)
+        ofname="%s/lfm_ionogram-primary_%s-%s-%03d-%1.2f.h5"%(dname,conf.station_name,p_ch,cid,t0)
         print("Writing to %s" % ofname)
         ho=h5py.File(ofname,"w")
-        S0=n.array(S[:,ridx],dtype=n.float16)     # ionogram frequency-range, save space
-        ho["S"]=S0[fidx,:]
-        ho["freqs"]=freqs[fidx]  # frequency bins
+        Sp0=n.array(Sp[:,:,ridx],dtype=n.float16)     # ionogram frequency-range, save space
+        Ss0=n.array(Ss[:,:,ridx],dtype=n.float16)
+
+        ho["Sp"]=Sp0[fidx_p,0,:]
+        ho["Ss"]=Ss0[fidx_s,0,:]
+
+        ho["phase_diff"]=Sp0[fidx_p,1,:] - Ss0[fidx_s,1,:]
+
+        ho["pfreqs"]=pfreqs[fidx_p]  # frequency bins
+        ho["sfreqs"]=sfreqs[fidx_s]
+
         ho["rate"]=rate    # chirp-rate
         ho["ranges"]=range_gates[ridx]
         ho["t0"]=t0
         ho["id"]=cid
         ho["station_name"]=conf.station_name
         ho["sr"]=float(sr_dec) # ionogram sample-rate
-        if conf.save_raw_voltage:
-            ho["z"]=zd
-        ho["ch"]=ch            # channel name
+        #if conf.save_raw_voltage:
+            #ho["z"]=zdsave
+        ho["p_ch"]=p_ch            # channel name
         ho.close()
     except:
         traceback.print_exc(file=sys.stdout)
@@ -232,7 +271,7 @@ def chirp_downconvert(conf,
     sys.stdout.flush()
     
 
-def analyze_all(conf,d):
+def analyze_all(conf,d,p_ch,s_ch):
     fl=glob.glob("%s/*/par-*.h5"%(conf.output_dir))
     n_ionograms=len(fl)
     # mpi scan through the whole dataset
@@ -244,15 +283,16 @@ def analyze_all(conf,d):
         print("calculating i0=%d chirp_rate=%1.2f kHz/s t0=%1.6f"%(i0,chirp_rate/1e3,t0))
         h.close()
 
-        chirp_downconvert(conf,
+        chirp_downconvert_double(conf,
                           t0,
                           d,
                           i0,                  
-                          conf.channel,
+                          p_ch,
+                          s_ch,
                           chirp_rate,
                           dec=2500)
-
-def analyze_realtime(conf,d):
+'''
+def analyze_realtime(conf,d,p_ch,s_ch):
     """ 
     Realtime analysis using analytic timing
     We allocate one MPI process for each sounder to be on the safe side.
@@ -263,152 +303,166 @@ def analyze_realtime(conf,d):
     """
     st=conf.sounder_timings[rank]
     n_sounders=len(st)    
-    ch=conf.channel
+
     while True:    
-        b=d.get_bounds(ch)
-        t0=np.floor(np.float128(b[0]) / np.float128(conf.sample_rate))
-        t1=np.floor(np.float128(b[1]) / np.float128(conf.sample_rate))
+        if kill(conf):
+            print("kill.txt found, stopping calc_ionograms.py")
+            sys.exit(0)
+        else:
+            b=d.get_bounds(p_ch)
+            t0=np.floor(np.float128(b[0]) / np.float128(conf.sample_rate))
+            t1=np.floor(np.float128(b[1]) / np.float128(conf.sample_rate))
 
-        # find the next sounder that can be measured with shortest wait time
-        best_sounder=0
-        best_wait_time=1e6
-        best_t0=0
-        best_id=0
-        for s_idx in range(n_sounders):
-            rep=np.float128(st[s_idx]["rep"])
-            chirpt=np.float128(st[s_idx]["chirpt"])
-            chirp_rate=st[s_idx]["chirp-rate"]
-            cid=st[s_idx]["id"]
-            
-            try_t0=rep*np.floor(t0/rep)+chirpt
-            while try_t0 < t0:
-                try_t0+=rep
-            wait_time = try_t0-t0
+            # find the next sounder that can be measured with shortest wait time
+            best_sounder=0
+            best_wait_time=1e6
+            best_t0=0
+            best_id=0
+            for s_idx in range(n_sounders):
+                rep=np.float128(st[s_idx]["rep"])
+                chirpt=np.float128(st[s_idx]["chirpt"])
+                chirp_rate=st[s_idx]["chirp-rate"]
+                cid=st[s_idx]["id"]
+                
+                try_t0=rep*np.floor(t0/rep)+chirpt
+                while try_t0 < t0:
+                    try_t0+=rep
+                wait_time = try_t0-t0
 
-            if wait_time < best_wait_time:
-                best_sounder=s_idx
-                best_t0=try_t0
-                best_wait_time=wait_time
-                best_id=cid
-        rep=np.float128(st[best_sounder]["rep"])
-        chirpt=np.float128(st[best_sounder]["chirpt"])
-        chirp_rate=st[best_sounder]["chirp-rate"]
-        next_t0=float(best_t0)
-        print("Rank %d chirp id %d analyzing chirp-rate %1.2f kHz/s chirpt %1.4f rep %1.2f"%(rank,best_id,chirp_rate/1e3,chirpt,rep))
-        i0=int(next_t0*conf.sample_rate)
-        realtime_req=conf.sample_rate/chirp_rate
-        print("Buffer extent %1.2f-%1.2f launching next chirp at %1.2f %s"%(b[0]/conf.sample_rate,
-                                                                            b[1]/conf.sample_rate,
-                                                                            next_t0,
-                                                                            cd.unix2datestr(next_t0)))
-
-
-        chirp_downconvert(conf,
-                          next_t0,
-                          d,
-                          i0,                  
-                          conf.channel,
-                          chirp_rate,
-                          realtime_req=realtime_req,
-                          dec=conf.decimation,
-                          cid=best_id)
+                if wait_time < best_wait_time:
+                    best_sounder=s_idx
+                    best_t0=try_t0
+                    best_wait_time=wait_time
+                    best_id=cid
+            rep=np.float128(st[best_sounder]["rep"])
+            chirpt=np.float128(st[best_sounder]["chirpt"])
+            chirp_rate=st[best_sounder]["chirp-rate"]
+            next_t0=float(best_t0)
+            print("Rank %d chirp id %d analyzing chirp-rate %1.2f kHz/s chirpt %1.4f rep %1.2f"%(rank,best_id,chirp_rate/1e3,chirpt,rep))
+            i0=int(next_t0*conf.sample_rate)
+            realtime_req=conf.sample_rate/chirp_rate
+            print("Buffer extent %1.2f-%1.2f launching next chirp at %1.2f %s"%(b[0]/conf.sample_rate,
+                                                                                b[1]/conf.sample_rate,
+                                                                                next_t0,
+                                                                                cd.unix2datestr(next_t0)))
 
 
-def get_next_chirp_par_file(conf, d):
+            chirp_downconvert(conf,
+                              next_t0,
+                              d,
+                              i0,                  
+                              p_ch,
+                              s_ch,
+                              chirp_rate,
+                              realtime_req=realtime_req,
+                              dec=conf.decimation,
+                              cid=best_id)
+
+'''
+def get_next_chirp_par_file(conf, d,p_ch,s_ch):
     """ 
     wait until we encounter a parameter file with remaining time 
     """
     # find the next sounder that can be measured
     while True:
-        ch=conf.channel
-        b=d.get_bounds(ch)
-        buffer_t0=np.floor(np.float128(b[0])/np.float128(conf.sample_rate))
-        while np.isnan(buffer_t0):
-            b=d.get_bounds(ch)
+        if kill(conf):
+            print("kill.txt found, stopping calc_ionograms.py")
+            sys.exit(0)
+        else:
+            b=d.get_bounds(p_ch)
             buffer_t0=np.floor(np.float128(b[0])/np.float128(conf.sample_rate))
-#            t1=np.floor(np.float128(b[1])/np.float128(conf.sample_rate))
-            print("nan bounds for ringbuffer. trying again")
+            while np.isnan(buffer_t0):
+                b=d.get_bounds(p_ch)
+                buffer_t0=np.floor(np.float128(b[0])/np.float128(conf.sample_rate))
+                # t1=np.floor(np.float128(b[1])/np.float128(conf.sample_rate))
+                print("nan bounds for ringbuffer. trying again")
+                time.sleep(1)
+
+            
+            # todo: look at today and yesterday. only looking
+            # at today will result in a few lost ionograms
+            # when the day is changing
+            dname="%s/%s"%(conf.output_dir,cd.unix2dirname(time.time()))
+            flp=glob.glob("%s/par-*-%s.h5"%(dname,p_ch))
+            flp.sort()
+            
+            if len(flp)> 0:
+                for fi in range(len(flp)):
+                    ftry = flp[len(flp)-fi-1]
+                    if os.path.exists(ftry[:-4]+s_ch[2]+ftry[-3:]):
+                    # proceed if this hasn't already been analyzed.
+                        if not os.path.exists("%s.done"%(ftry)):
+                            h=h5py.File(ftry,"r")
+                            t0=float(np.copy(h[("t0")]))
+                            i0=np.int64(t0*conf.sample_rate)
+                            chirp_rate=float(np.copy(h[("chirp_rate")]))
+                            h.close()
+                            t1=conf.maximum_analysis_frequency/chirp_rate + t0
+                            
+                            tnow=time.time()
+
+                            # if the beginning of the buffer is before the end of the chirp,
+                            # start analyzing as there is at least some of the the ionogram
+                            # still in the buffer. the start of the buffer is
+                            # before the the chirp ends
+                            # t0 ---- t1
+                            #      bt0-------bt1
+                            if buffer_t0 < t1:
+                                # if not already analyzed, analyze it
+                                if not os.path.exists("%s.done"%(ftry)):
+                                    ho=h5py.File("%s.done"%(ftry),"w")
+                                    ho["t_an"]=time.time()
+                                    ho.close()
+                                    print("Rank %d analyzing %s time left in sweep %1.2f s"%(rank,ftry,t1-tnow))
+                                    return(ftry)
+                            else:
+                                # we haven't analyzed this one, but we no longer
+                                # can, because it is not in the buffer
+                                print("Not able to analyze %s (%1.2f kHz/s), because it is no longer in the buffer. Buffer start at %1.2f and chirp ends at %1.2f"%(ftry,chirp_rate/1e3,buffer_t0,t1))
+                                ho=h5py.File("%s.done"%(ftry),"w")
+                                ho["t_an"]=time.time()
+                                ho.close()
+                                time.sleep(0.01)
+                    
+
+                                
+            # didn't find anything. let's wait.
             time.sleep(1)
 
         
-        # todo: look at today and yesterday. only looking
-        # at today will result in a few lost ionograms
-        # when the day is changing
-        dname="%s/%s"%(conf.output_dir,cd.unix2dirname(time.time()))
-        fl=glob.glob("%s/par*.h5"%(dname))
-        fl.sort()
-        
-        if len(fl)> 0:
-            for fi in range(len(fl)):
-                ftry = fl[len(fl)-fi-1]
-
-                # proceed if this hasn't already been analyzed.
-                if not os.path.exists("%s.done"%(ftry)):
-                    h=h5py.File(ftry,"r")
-                    t0=float(np.copy(h[("t0")]))
-                    i0=np.int64(t0*conf.sample_rate)
-                    chirp_rate=float(np.copy(h[("chirp_rate")]))
-                    h.close()
-                    t1=conf.maximum_analysis_frequency/chirp_rate + t0
-                    
-                    tnow=time.time()
-
-                    # if the beginning of the buffer is before the end of the chirp,
-                    # start analyzing as there is at least some of the the ionogram
-                    # still in the buffer. the start of the buffer is
-                    # before the the chirp ends
-                    # t0 ---- t1
-                    #      bt0-------bt1
-                    if buffer_t0 < t1:
-                        # if not already analyzed, analyze it
-                        if not os.path.exists("%s.done"%(ftry)):
-                            ho=h5py.File("%s.done"%(ftry),"w")
-                            ho["t_an"]=time.time()
-                            ho.close()
-                            print("Rank %d analyzing %s time left in sweep %1.2f s"%(rank,ftry,t1-tnow))
-                            return(ftry)
-                    else:
-                        # we haven't analyzed this one, but we no longer
-                        # can, because it is not in the buffer
-                        print("Not able to analyze %s (%1.2f kHz/s), because it is no longer in the buffer. Buffer start at %1.2f and chirp ends at %1.2f"%(ftry,chirp_rate/1e3,buffer_t0,t1))
-                        ho=h5py.File("%s.done"%(ftry),"w")
-                        ho["t_an"]=time.time()
-                        ho.close()
-                        time.sleep(0.01)
-                            
-        # didn't find anything. let's wait.
-        time.sleep(1)
-
-        
-def analyze_parfiles(conf,d):
+def analyze_parfiles(conf,d,p_ch,s_ch):
     """ 
     Realtime analysis using newly found parameter files.
     """
-    ch=conf.channel
     while True:
-
-        ftry=get_next_chirp_par_file(conf,d)
-        
-        h=h5py.File(ftry,"r")
-        t0=float(np.copy(h[("t0")]))
-        i0=np.int64(t0*conf.sample_rate)
-        chirp_rate=float(np.copy(h[("chirp_rate")]))
-        h.close()
-        
-        chirp_downconvert(conf,
-                          t0,
-                          d,
-                          i0,                  
-                          conf.channel,
-                          chirp_rate,
-                          dec=conf.decimation,
-                          cid=0)
-        
-        time.sleep(0.1)
-        
+        if kill(conf):
+            print("kill.txt found, stopping calc_ionograms.py")
+            sys.exit(0)
+        else:
+            ftry=get_next_chirp_par_file(conf,d,p_ch,s_ch)
+            
+            h=h5py.File(ftry,"r")
+            t0=float(np.copy(h[("t0")]))
+            i0=np.int64(t0*conf.sample_rate)
+            chirp_rate=float(np.copy(h[("chirp_rate")]))
+            h.close()
+            
+            chirp_downconvert_double(conf,
+                              t0,
+                              d,
+                              i0,                  
+                              p_ch,
+                              s_ch,
+                              chirp_rate,
+                              dec=conf.decimation,
+                              cid=0)
+            
+            time.sleep(0.1)
+            
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2:
+    #print(len(sys.argv))
+    if len(sys.argv) == 4:
         conf=cc.chirp_config(sys.argv[1])
     else:
         conf=cc.chirp_config()
@@ -419,32 +473,53 @@ if __name__ == "__main__":
     if conf.serendipitous:
         # avoid having two processes snag the same sounder at the start
         time.sleep(rank)
+        first=1
         while True:
-            try:
-                d=drf.DigitalRFReader(conf.data_dir)
-                analyze_parfiles(conf,d)
-            except:
-                print("error in calc_ionograms.py. trying to restart")
-                traceback.print_exc(file=sys.stdout)
-                sys.stdout.flush()
-                time.sleep(1)
+            if kill(conf):
+                print("kill.txt found, stopping calc_ionograms.py")
+                sys.exit(0)
+            else:
+                if first==1:
+                    #try:
+                    time.sleep(10)
+                        #d=drf.DigitalRFReader(conf.data_dir)
+                        #analyze_parfiles(conf,d,sys.argv[2],sys.argv[3])
+                    first = 0
+                    #except:
+                    #    print("error in calc_ionograms.py. trying to restart")
+                    #    traceback.print_exc(file=sys.stdout)
+                    #    sys.stdout.flush()
+                    #    time.sleep(1)
+
+                else:
+                    try:
+                        d=drf.DigitalRFReader(conf.data_dir)
+                        analyze_parfiles(conf,d,sys.argv[2],sys.argv[3])
+                    except:
+                        print("error in calc_ionograms.py. trying to restart")
+                        traceback.print_exc(file=sys.stdout)
+                        sys.stdout.flush()
+                        time.sleep(1)
                 
         
-        
-    elif conf.realtime: # analyze analytic timings
-        while True:
-            try:
-                d=drf.DigitalRFReader(conf.data_dir)
-                analyze_realtime(conf,d)
-            except:
-                print("error in calc_ionograms.py. trying to restart")
-                traceback.print_exc(file=sys.stdout)
-                sys.stdout.flush()
-                time.sleep(1)
-        
+       
+    #elif conf.realtime: # analyze analytic timings
+        #while True:
+            #if kill(conf):
+            #    print("kill.txt found, stopping calc_ionograms.py")
+            #    sys.exit(0)
+            #else:
+            #    try:
+            #        d=drf.DigitalRFReader(conf.data_dir)
+            #        analyze_realtime(conf,d,sys.argv[2],sys.argv[3])
+            #    except:
+            #       print("error in calc_ionograms.py. trying to restart")
+            #        traceback.print_exc(file=sys.stdout)
+            #        sys.stdout.flush()
+            #        time.sleep(1) 
     else: # batch analyze
         d=drf.DigitalRFReader(conf.data_dir)
-        analyze_all(conf,d)
+        analyze_all(conf,d,sys.argv[2],sys.argv[3])
 
 
 

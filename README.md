@@ -1,10 +1,13 @@
-# Chirp Sounder 2
+# Chirp Sounder 2 Dev Project
+## O and X modes on Ionograms
+
+This is a new implementation of the <a href="https://github.com/jvierine/chirpsounder2">Chirp Sounder 2</a>. I am developing O and X mode ability for these ionograms using mult channel capabilities and orthogonal antennas and attempting to calculate the stokes parameter V in the data analysis. Its still in development, but the multichannel has been fixed using threads and the code now has support for the Ettus Research Octoclock.
+
 
 This software can be used to detect chirp sounders and over-the-horizon radar transmissions over the air, and to calculate ionograms from them. The software relies on <a href="https://github.com/MITHaystack/digital_rf">Digital RF</a> recordings of HF. The program can be run in realtime on complex voltage recorded into a ringbuffer, but it can also be run offline on a recording on a disk. 
 
-This is a new implementation of the <a href="https://github.com/jvierine/chirpsounder">GNU Chirp Sounder</a>. This new version allows you to now automatically find chirps without knowledge of what the timing and chirp-rate is. You can still figure out the true distance if you have a GPSDO, as most sounders start at a full second. 
-
 Jens Floberg's <a href="https://munin.uit.no/handle/10037/25828">masters thesis</a> discusses the use of chirpsounder2 to make oblique ionograms using this software. 
+
 
 ## Installation
 See dependencies.txt for instructions on how to build the dependencies (tested on Ubuntu 18 & 20)
