@@ -4,13 +4,7 @@
 # by listening to signals on the antenna.
 # 
 
-sysctl -w net.core.wmem_max=500000000
-sysctl -w net.core.rmem_max=500000000
-sysctl -w net.core.wmem_default=500000000
-sysctl -w net.core.rmem_default=500000000
-
-
-INSTALL_PATH=/home/sdr/stokes_copy
+INSTALL_PATH=/home/sdr/Chirpsounder2.1-modeseparation
 
 # make sure this is the right mpirun command (you might need mpirun instead of mpirun.mpich)
 MPIRUN=mpirun
